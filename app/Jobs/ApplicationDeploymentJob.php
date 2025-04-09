@@ -19,6 +19,7 @@ use App\Notifications\Application\DeploymentFailed;
 use App\Notifications\Application\DeploymentSuccess;
 use App\Traits\ExecuteRemoteCommand;
 use Carbon\Carbon;
+use Exception;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeEncrypted;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -328,13 +329,8 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
             } else {
                 $this->write_deployment_configurations();
             }
-            $this->execute_remote_command(
-                [
-                    "docker rm -f {$this->deployment_uuid} >/dev/null 2>&1",
-                    'hidden' => true,
-                    'ignore_errors' => true,
-                ]
-            );
+            $this->application_deployment_queue->addLogEntry("Gracefully shutting down build container: {$this->deployment_uuid}");
+            $this->graceful_shutdown_container($this->deployment_uuid);
 
             ApplicationStatusChanged::dispatch(data_get($this->application, 'environment.project.team.id'));
         }
@@ -1207,11 +1203,10 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
             if ($this->application->custom_healthcheck_found) {
                 $this->application_deployment_queue->addLogEntry('Custom healthcheck found, skipping default healthcheck.');
             }
-            // ray('New container name: ', $this->container_name);
             if ($this->container_name) {
                 $counter = 1;
                 $this->application_deployment_queue->addLogEntry('Waiting for healthcheck to pass on the new container.');
-                if ($this->full_healthcheck_url) {
+                if ($this->full_healthcheck_url && ! $this->application->custom_healthcheck_found) {
                     $this->application_deployment_queue->addLogEntry("Healthcheck URL (inside the container): {$this->full_healthcheck_url}");
                 }
                 $this->application_deployment_queue->addLogEntry("Waiting for the start period ({$this->application->health_check_start_period} seconds) before starting healthcheck.");
@@ -1366,13 +1361,7 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
             }
         }
         $this->application_deployment_queue->addLogEntry("Preparing container with helper image: $helperImage.");
-        $this->execute_remote_command(
-            [
-                'command' => "docker rm -f {$this->deployment_uuid}",
-                'ignore_errors' => true,
-                'hidden' => true,
-            ]
-        );
+        $this->graceful_shutdown_container($this->deployment_uuid);
         $this->execute_remote_command(
             [
                 $runCommand,
@@ -1410,7 +1399,6 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
 
                 continue;
             }
-            // ray('Deploying to additional destination: ', $server->name);
             $deployment_uuid = new Cuid2;
             queue_application_deployment(
                 deployment_uuid: $deployment_uuid,
@@ -1719,8 +1707,11 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
                 'save' => 'dockerfile_from_repo',
                 'ignore_errors' => true,
             ]);
-            $dockerfile = collect(str($this->saved_outputs->get('dockerfile_from_repo'))->trim()->explode("\n"));
-            $this->application->parseHealthcheckFromDockerfile($dockerfile);
+            $this->application->parseHealthcheckFromDockerfile($this->saved_outputs->get('dockerfile_from_repo'));
+        }
+        $custom_network_aliases = [];
+        if (is_array($this->application->custom_network_aliases) && count($this->application->custom_network_aliases) > 0) {
+            $custom_network_aliases = $this->application->custom_network_aliases;
         }
         $docker_compose = [
             'services' => [
@@ -1731,9 +1722,10 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
                     'expose' => $ports,
                     'networks' => [
                         $this->destination->network => [
-                            'aliases' => [
-                                $this->container_name,
-                            ],
+                            'aliases' => array_merge(
+                                [$this->container_name],
+                                $custom_network_aliases
+                            ),
                         ],
                     ],
                     'mem_limit' => $this->application->limits_memory,
@@ -2023,11 +2015,17 @@ LABEL coolify.deploymentId={$this->deployment_uuid}
 COPY . .
 RUN rm -f /usr/share/nginx/html/nginx.conf
 RUN rm -f /usr/share/nginx/html/Dockerfile
+RUN rm -f /usr/share/nginx/html/docker-compose.yaml
+RUN rm -f /usr/share/nginx/html/.env
 COPY ./nginx.conf /etc/nginx/conf.d/default.conf");
                 if (str($this->application->custom_nginx_configuration)->isNotEmpty()) {
                     $nginx_config = base64_encode($this->application->custom_nginx_configuration);
                 } else {
-                    $nginx_config = base64_encode(defaultNginxConfiguration());
+                    if ($this->application->settings->is_spa) {
+                        $nginx_config = base64_encode(defaultNginxConfiguration('spa'));
+                    } else {
+                        $nginx_config = base64_encode(defaultNginxConfiguration());
+                    }
                 }
             } else {
                 if ($this->application->build_pack === 'nixpacks') {
@@ -2094,7 +2092,11 @@ COPY ./nginx.conf /etc/nginx/conf.d/default.conf");
                 if (str($this->application->custom_nginx_configuration)->isNotEmpty()) {
                     $nginx_config = base64_encode($this->application->custom_nginx_configuration);
                 } else {
-                    $nginx_config = base64_encode(defaultNginxConfiguration());
+                    if ($this->application->settings->is_spa) {
+                        $nginx_config = base64_encode(defaultNginxConfiguration('spa'));
+                    } else {
+                        $nginx_config = base64_encode(defaultNginxConfiguration());
+                    }
                 }
             }
             $build_command = "docker build {$this->addHosts} --network host -f {$this->workdir}/Dockerfile {$this->build_args} --progress plain -t {$this->production_image_name} {$this->workdir}";
