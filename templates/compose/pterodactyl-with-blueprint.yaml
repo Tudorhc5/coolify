@@ -1,0 +1,79 @@
+services:
+  panel:
+    image: ghcr.io/blueprintframework/blueprint:latest
+    environment:
+      - SERVICE_FQDN_PTERODACTYL-PANEL_80
+      - 'HASHIDS_SALT=${SERVICE_PASSWORD_HASH_SALT}'
+      - HASHIDS_LENGTH=8
+      - APP_ENV=production
+      - APP_KEY=${SERVICE_PASSWORD_APP_KEY}
+      - 'APP_ENVIRONMENT_ONLY=${APP_ENVIRONMENT_ONLY:-false}'
+      - 'APP_SERVICE_AUTHOR=${APP_SERVICE_AUTHOR}'
+      - 'APP_URL=${APP_URL}'
+      - 'APP_TIMEZONE=${TZ:-Asia/Bangkok}'
+      - CACHE_DRIVER=redis
+      - SESSION_DRIVER=redis
+      - QUEUE_DRIVER=redis
+      - 'REDIS_HOST=${REDIS_HOST:-redis}'
+      - 'REDIS_PORT=${REDIS_PORT:-6379}'
+      - 'MAIL_FROM=${MAIL_FROM}'
+      - 'MAIL_DRIVER=${MAIL_DRIVER:-smtp}'
+      - 'MAIL_HOST=${MAIL_HOST}'
+      - 'MAIL_PORT=${MAIL_PORT:-587}'
+      - 'MAIL_USERNAME=${MAIL_USERNAME}'
+      - 'MAIL_PASSWORD=${MAIL_PASSWORD}'
+      - 'MAIL_ENCRYPTION=${MAIL_ENCRYPTION:-true}'
+      - 'APP_DEBUG=${APP_DEBUG:-false}'
+      - DB_HOST=panel-db
+      - 'DB_PORT=${DB_PORT:-3306}'
+      - 'SERVICE_PASSWORD_MARIADB=${SERVICE_PASSWORD_MARIADB}'
+      - 'DB_USERNAME=${DB_USERNAME:-pterodactyl}'
+      - 'DB_DATABASE=${DB_DATABASE:-panel}'
+      - 'DB_PASSWORD=${SERVICE_PASSWORD_MARIADB}'
+    volumes:
+      - 'panel-data:/data'
+      - 'blueprint-extensions:/blueprint_extensions'
+    depends_on:
+      panel-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - '-f'
+        - 'http://127.0.0.1:80'
+      interval: 2s
+      timeout: 10s
+      retries: 15
+  panel-db:
+    image: 'mariadb:11'
+    environment:
+      - 'MYSQL_ROOT_PASSWORD=${SERVICE_PASSWORD_MARIADB-ROOT}'
+      - 'MYSQL_DATABASE=${DB_DATABASE:-panel}'
+      - 'MYSQL_USER=${DB_USERNAME:-pterodactyl}'
+      - 'MYSQL_PASSWORD=${SERVICE_PASSWORD_MARIADB}'
+    volumes:
+      - 'panel-db-data:/var/lib/mysql'
+    healthcheck:
+      test:
+        - CMD
+        - healthcheck.sh
+        - '--connect'
+        - '--innodb_initialized'
+      interval: 5s
+      timeout: 20s
+      retries: 10
+  redis:
+    image: 'redis:7.4-alpine'
+    volumes:
+      - 'panel-redis-data:/data'
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - PING
+      interval: 5s
+      timeout: 10s
+      retries: 20
